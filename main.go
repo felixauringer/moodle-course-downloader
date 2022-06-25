@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"golang.org/x/net/html"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -54,19 +56,37 @@ func fetchPage(target *url.URL) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	buffer := make([]byte, 512)
-	for {
-		_, err := response.Body.Read(buffer)
-		if err != nil {
-			break
-		} else {
-			fmt.Print(string(buffer))
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}(response.Body)
+
+	document, err := html.Parse(response.Body)
+	links := extractLinks(document)
+	for _, link := range links {
+		fmt.Println(*link)
+	}
+}
+
+func extractLinks(node *html.Node) []*url.URL {
+	links := make([]*url.URL, 0)
+	if node.Type == html.ElementNode && node.Data == "a" {
+		for _, attribute := range node.Attr {
+			if attribute.Key == "href" {
+				href, err := url.Parse(attribute.Val)
+				if err != nil {
+					log.Fatal(err)
+				}
+				links = append(links, configuration.BaseUrl.ResolveReference(href))
+				break
+			}
 		}
 	}
-	err = response.Body.Close()
-	if err != nil {
-		log.Fatal(err)
+	for current := node.FirstChild; current != nil; current = current.NextSibling {
+		links = append(links, extractLinks(current)...)
 	}
+	return links
 }
 
 func main() {
