@@ -9,11 +9,42 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 type config struct {
 	BaseUrl  *url.URL
 	CourseId int
+}
+
+type MoodleResource struct {
+	*url.URL
+}
+
+func (mr MoodleResource) IsCourse() bool {
+	return strings.HasPrefix(mr.URL.Path, "/course")
+}
+
+func (mr MoodleResource) Equals(other MoodleResource) bool {
+	if mr.Host != other.Host || mr.Scheme != other.Scheme || mr.Path != other.Path {
+		return false
+	}
+	if mr.RawQuery != "" || other.RawQuery != "" {
+		theseValues, err := url.ParseQuery(mr.RawQuery)
+		if err != nil {
+			return false
+		}
+		otherValues, err := url.ParseQuery(other.RawQuery)
+		if err != nil {
+			return false
+		}
+		for _, key := range []string{"id"} {
+			if theseValues.Get(key) != otherValues.Get(key) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (c config) StartUrl() *url.URL {
