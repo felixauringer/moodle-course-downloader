@@ -63,13 +63,13 @@ func fetchPage(target *url.URL) {
 	}(response.Body)
 
 	document, err := html.Parse(response.Body)
-	links := extractLinks(document)
+	links := extractLinks(document, target)
 	for _, link := range links {
 		fmt.Println(*link)
 	}
 }
 
-func extractLinks(node *html.Node) []*url.URL {
+func extractLinks(node *html.Node, base *url.URL) []*url.URL {
 	links := make([]*url.URL, 0)
 	if node.Type == html.ElementNode {
 		var attributeName string
@@ -87,14 +87,17 @@ func extractLinks(node *html.Node) []*url.URL {
 					if err != nil {
 						log.Fatal(err)
 					}
-					links = append(links, configuration.BaseUrl.ResolveReference(href))
+					if !href.IsAbs() {
+						href = base.ResolveReference(href)
+					}
+					links = append(links, href)
 					break
 				}
 			}
 		}
 	}
 	for current := node.FirstChild; current != nil; current = current.NextSibling {
-		links = append(links, extractLinks(current)...)
+		links = append(links, extractLinks(current, base)...)
 	}
 	return links
 }
