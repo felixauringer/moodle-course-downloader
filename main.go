@@ -71,15 +71,25 @@ func fetchPage(target *url.URL) {
 
 func extractLinks(node *html.Node) []*url.URL {
 	links := make([]*url.URL, 0)
-	if node.Type == html.ElementNode && node.Data == "a" {
-		for _, attribute := range node.Attr {
-			if attribute.Key == "href" {
-				href, err := url.Parse(attribute.Val)
-				if err != nil {
-					log.Fatal(err)
+	if node.Type == html.ElementNode {
+		var attributeName string
+		if node.Data == "a" {
+			attributeName = "href"
+		} else if node.Data == "img" {
+			attributeName = "src"
+		} else {
+			// TODO: are there other nodes that should be downloaded?
+		}
+		if attributeName != "" {
+			for _, attribute := range node.Attr {
+				if attribute.Key == attributeName {
+					href, err := url.Parse(attribute.Val)
+					if err != nil {
+						log.Fatal(err)
+					}
+					links = append(links, configuration.BaseUrl.ResolveReference(href))
+					break
 				}
-				links = append(links, configuration.BaseUrl.ResolveReference(href))
-				break
 			}
 		}
 	}
