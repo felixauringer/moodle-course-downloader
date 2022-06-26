@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -161,6 +162,8 @@ func (c *Crawler) exportSummary() {
 		}
 	}
 	c.DoneMutex.Unlock()
+	sort.Strings(downloaded)
+	sort.Strings(external)
 	_, err = outputFile.WriteString(fmt.Sprintf("The crawler downloaded %d moodle resources:\n", len(downloaded)))
 	if err != nil {
 		log.Fatal(err)
