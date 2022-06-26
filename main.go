@@ -80,7 +80,7 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 	}, nil
 }
 
-func (c *Crawler) StartResource() MoodleResource {
+func (c *Crawler) startResource() MoodleResource {
 	parameters := url.Values{}
 	parameters.Set("id", strconv.Itoa(c.CourseId))
 	target := *c.Base
@@ -89,12 +89,12 @@ func (c *Crawler) StartResource() MoodleResource {
 	return NewResource(&target)
 }
 
-func (c *Crawler) IsExternal(resource MoodleResource) bool {
+func (c *Crawler) isExternal(resource MoodleResource) bool {
 	return resource.Host != c.Base.Host
 }
 
 func (c *Crawler) Run() {
-	c.fetchPage(c.StartResource())
+	c.fetchPage(c.startResource())
 }
 
 func (c *Crawler) parseHtml(resource MoodleResource, body io.ReadCloser) {
