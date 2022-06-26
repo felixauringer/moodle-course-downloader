@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	set "github.com/deckarep/golang-set/v2"
 	"github.com/joho/godotenv"
 	"golang.org/x/net/html"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type MoodleResource struct {
@@ -47,8 +49,11 @@ func (mr MoodleResource) IsCourse() bool {
 
 type Crawler struct {
 	*http.Client
-	Base     *url.URL
-	CourseId int
+	Base       *url.URL
+	CourseId   int
+	Visited    set.Set[MoodleResource]
+	Queue      set.Set[MoodleResource]
+	QueueMutex *sync.Mutex
 }
 
 func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
@@ -65,7 +70,14 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 	}
 	jar.SetCookies(base, []*http.Cookie{sessionCookie})
 	client := &http.Client{Jar: jar}
-	return &Crawler{client, base, courseId}, nil
+	return &Crawler{
+		client,
+		base,
+		courseId,
+		set.NewSet[MoodleResource](),
+		set.NewSet[MoodleResource](),
+		&sync.Mutex{},
+	}, nil
 }
 
 func (c *Crawler) StartResource() MoodleResource {
