@@ -3,10 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/joho/godotenv"
 	"golang.org/x/net/html"
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strconv"
@@ -52,7 +54,7 @@ func (mr MoodleResource) Equals(other MoodleResource) bool {
 	return true
 }
 
-func (c config) StartResoure() MoodleResource {
+func (c config) StartResource() MoodleResource {
 	parameters := url.Values{}
 	parameters.Set("id", strconv.Itoa(c.CourseId))
 	target := *configuration.BaseUrl
@@ -83,8 +85,20 @@ func parseFlags() config {
 }
 
 func initialize() {
-	client = &http.Client{}
 	configuration = parseFlags()
+	if err := godotenv.Load(); err != nil {
+		log.Fatal(err)
+	}
+	sessionCookie := &http.Cookie{
+		Name:  os.Getenv("COOKIE_NAME"),
+		Value: os.Getenv("COOKIE_VALUE"),
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	jar.SetCookies(configuration.BaseUrl, []*http.Cookie{sessionCookie})
+	client = &http.Client{Jar: jar}
 }
 
 func parseHtml(resource MoodleResource, body io.ReadCloser) {
@@ -207,5 +221,5 @@ func extractLinks(node *html.Node, base *url.URL) []*url.URL {
 
 func main() {
 	initialize()
-	fetchPage(configuration.StartUrl())
+	fetchPage(configuration.StartResource())
 }
