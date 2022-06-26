@@ -24,7 +24,7 @@ type MoodleResource struct {
 }
 
 func NewResource(resourceUrl *url.URL) MoodleResource {
-	// only Scheme, Host, Path and the id parameter from RawQuery are relevant
+	// only Scheme, Host, Path and some parameters from RawQuery are relevant
 	resource := MoodleResource{
 		url.URL{
 			Scheme: resourceUrl.Scheme,
@@ -36,11 +36,13 @@ func NewResource(resourceUrl *url.URL) MoodleResource {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if idValue := values.Get("id"); idValue != "" {
-		newValues := url.Values{}
-		newValues.Set("id", idValue)
-		resource.URL.RawQuery = newValues.Encode()
+	newValues := url.Values{}
+	for _, key := range []string{"id", "curdate"} {
+		if value := values.Get(key); value != "" {
+			newValues.Set(key, value)
+		}
 	}
+	resource.URL.RawQuery = newValues.Encode()
 	return resource
 }
 
@@ -83,7 +85,7 @@ func NewCrawler(baseURL *url.URL, courseId int, basePath string) (*Crawler, erro
 	client := &http.Client{Jar: jar}
 	return &Crawler{
 		client,
-		basePath,
+		filepath.Join(basePath, fmt.Sprintf("course-%d", courseId)),
 		baseURL,
 		courseId,
 		set.NewThreadUnsafeSet[MoodleResource](),
@@ -104,6 +106,35 @@ func (c *Crawler) startPoint() string {
 
 func (c *Crawler) isExternal(resource MoodleResource) bool {
 	return resource.Host != c.BaseURL.Host
+}
+
+func (c *Crawler) FilePath(resource MoodleResource, contentType string) string {
+	components := []string{c.BasePath, fmt.Sprintf("%s-%s", resource.Scheme, resource.Host), resource.Path}
+	values, err := url.ParseQuery(resource.RawQuery)
+	if err == nil {
+		idParameter := values.Get("id")
+		if idParameter != "" {
+			components = append(components, fmt.Sprintf("id-%s", idParameter))
+		}
+	}
+	filePath := filepath.Join(components...)
+	if filepath.Ext(filePath) == "" {
+		var extension string
+		switch contentType {
+		case "text/html":
+			extension = "html"
+		case "application/pdf":
+			extension = "pdf"
+		default:
+			extension = "bin"
+		}
+		filePath = fmt.Sprintf("%s.%s", filePath, extension)
+	}
+	dirPath := filepath.Dir(filePath)
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		log.Fatal(err)
+	}
+	return filePath
 }
 
 func (c *Crawler) Run() {
@@ -156,7 +187,7 @@ func (c *Crawler) enqueue(targetUrl string, reference MoodleResource) {
 	}
 }
 
-func (c *Crawler) parseHtml(body io.ReadCloser, resource MoodleResource) {
+func (c *Crawler) saveHTML(body io.Reader, resource MoodleResource, file io.Writer) {
 	document, err := html.Parse(body)
 	if err != nil {
 		log.Fatal(err)
@@ -196,9 +227,16 @@ func (c *Crawler) parseHtml(body io.ReadCloser, resource MoodleResource) {
 	}
 
 	c.extractLinks(document, resource)
-	//if err := html.Render(os.Stdout, document); err != nil {
-	//	log.Fatal(err)
-	//}
+	if err := html.Render(file, document); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (c *Crawler) saveArbitraryFile(body io.Reader, file io.Writer) {
+	_, err := io.Copy(file, body)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func (c *Crawler) fetchPage(resource MoodleResource) {
@@ -217,11 +255,22 @@ func (c *Crawler) fetchPage(resource MoodleResource) {
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 		contentTypeHeader := response.Header.Get("content-type")
 		contentType := strings.Split(contentTypeHeader, ";")[0]
+		outputFile, err := os.Create(c.FilePath(resource, contentType))
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func(outputFile *os.File) {
+			err := outputFile.Close()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}(outputFile)
+
 		switch contentType {
 		case "text/html":
-			c.parseHtml(response.Body, resource)
+			c.saveHTML(response.Body, resource, outputFile)
 		default:
-			// TODO: save file
+			c.saveArbitraryFile(response.Body, outputFile)
 		}
 	case response.StatusCode >= 300 && response.StatusCode < 400:
 		location := response.Header.Get("location")
