@@ -38,7 +38,7 @@ func NewResource(resourceUrl *url.URL) MoodleResource {
 		log.Fatal(err)
 	}
 	newValues := url.Values{}
-	for _, key := range []string{"id", "curdate"} {
+	for _, key := range []string{"id"} {
 		if value := values.Get(key); value != "" {
 			newValues.Set(key, value)
 		}
