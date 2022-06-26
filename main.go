@@ -259,14 +259,12 @@ func (c *Crawler) extractLinks(node *html.Node, reference MoodleResource) {
 func loadConfiguration() (*url.URL, int, string, error) {
 	var courseId int
 	var domain string
-	var prefix string
 	var uncleanedPath string
 	flag.IntVar(&courseId, "id", 0, "the ID of the moodle course")
 	flag.StringVar(&domain, "domain", "", "the domain, e.g. `hpi.de`")
-	flag.StringVar(&prefix, "prefix", "", "optional path prefix, e.g. `/moodle`")
 	flag.StringVar(&uncleanedPath, "dir", "./output", "absolute or relative output directory")
 	flag.Parse()
-	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s%s", domain, prefix))
+	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s", domain))
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("could not parse URL from config: %w", err)
 	}
