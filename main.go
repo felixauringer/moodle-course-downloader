@@ -264,18 +264,15 @@ func loadConfiguration() (*url.URL, int, string, error) {
 	flag.StringVar(&domain, "domain", "", "the domain, e.g. `hpi.de`")
 	flag.StringVar(&uncleanedPath, "dir", "./output", "absolute or relative output directory")
 	flag.Parse()
-	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s", domain))
-	if err != nil {
-		return nil, 0, "", fmt.Errorf("could not parse URL from config: %w", err)
-	}
-	if parsedUrl.Host == "" || courseId == 0 {
+	if domain == "" || courseId == 0 {
 		return nil, 0, "", errors.New("host and course ID have to be specified")
 	}
+	baseUrl := &url.URL{Scheme: "https", Host: domain}
 	cleanedPath, err := filepath.Abs(uncleanedPath)
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("could not deduce absolute path: %w", err)
 	}
-	return parsedUrl, courseId, cleanedPath, nil
+	return baseUrl, courseId, cleanedPath, nil
 }
 
 func main() {
