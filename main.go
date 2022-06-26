@@ -13,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,7 +58,8 @@ func (mr MoodleResource) IsRelevant() bool {
 
 type Crawler struct {
 	*http.Client
-	Base       *url.URL
+	BasePath   string
+	BaseURL    *url.URL
 	CourseId   int
 	Done       set.Set[MoodleResource]
 	DoneMutex  *sync.Mutex
@@ -65,7 +67,7 @@ type Crawler struct {
 	QueueMutex *sync.Mutex
 }
 
-func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
+func NewCrawler(baseURL *url.URL, courseId int, basePath string) (*Crawler, error) {
 	if err := godotenv.Load(); err != nil {
 		return nil, fmt.Errorf("could not load .env: %w", err)
 	}
@@ -77,11 +79,12 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not create cookie jar: %w", err)
 	}
-	jar.SetCookies(base, []*http.Cookie{sessionCookie})
+	jar.SetCookies(baseURL, []*http.Cookie{sessionCookie})
 	client := &http.Client{Jar: jar}
 	return &Crawler{
 		client,
-		base,
+		basePath,
+		baseURL,
 		courseId,
 		set.NewThreadUnsafeSet[MoodleResource](),
 		&sync.Mutex{},
@@ -93,14 +96,14 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 func (c *Crawler) startPoint() string {
 	parameters := url.Values{}
 	parameters.Set("id", strconv.Itoa(c.CourseId))
-	target := *c.Base
+	target := *c.BaseURL
 	target.Path += "/course/view.php"
 	target.RawQuery = parameters.Encode()
 	return target.String()
 }
 
 func (c *Crawler) isExternal(resource MoodleResource) bool {
-	return resource.Host != c.Base.Host
+	return resource.Host != c.BaseURL.Host
 }
 
 func (c *Crawler) Run() {
@@ -253,30 +256,36 @@ func (c *Crawler) extractLinks(node *html.Node, reference MoodleResource) {
 	}
 }
 
-func loadConfiguration() (*url.URL, int, error) {
+func loadConfiguration() (*url.URL, int, string, error) {
 	var courseId int
 	var domain string
 	var prefix string
+	var uncleanedPath string
 	flag.IntVar(&courseId, "id", 0, "the ID of the moodle course")
 	flag.StringVar(&domain, "domain", "", "the domain, e.g. `hpi.de`")
 	flag.StringVar(&prefix, "prefix", "", "optional path prefix, e.g. `/moodle`")
+	flag.StringVar(&uncleanedPath, "dir", "./output", "absolute or relative output directory")
 	flag.Parse()
 	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s%s", domain, prefix))
 	if err != nil {
-		return nil, 0, fmt.Errorf("could not parse URL from config: %w", err)
+		return nil, 0, "", fmt.Errorf("could not parse URL from config: %w", err)
 	}
 	if parsedUrl.Host == "" || courseId == 0 {
-		return nil, 0, errors.New("host and course ID have to be specified")
+		return nil, 0, "", errors.New("host and course ID have to be specified")
 	}
-	return parsedUrl, courseId, nil
+	cleanedPath, err := filepath.Abs(uncleanedPath)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("could not deduce absolute path: %w", err)
+	}
+	return parsedUrl, courseId, cleanedPath, nil
 }
 
 func main() {
-	base, courseId, err := loadConfiguration()
+	base, courseId, cleanedPath, err := loadConfiguration()
 	if err != nil {
 		log.Fatal(err)
 	}
-	crawler, err := NewCrawler(base, courseId)
+	crawler, err := NewCrawler(base, courseId, cleanedPath)
 	if err != nil {
 		log.Fatal(err)
 	}
