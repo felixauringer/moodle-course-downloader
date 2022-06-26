@@ -17,33 +17,32 @@ import (
 )
 
 type MoodleResource struct {
-	*url.URL
+	url.URL
+}
+
+func NewResource(resourceUrl *url.URL) MoodleResource {
+	// only Scheme, Host, Path and the id parameter from RawQuery are relevant
+	resource := MoodleResource{
+		url.URL{
+			Scheme: resourceUrl.Scheme,
+			Host:   resourceUrl.Host,
+			Path:   resourceUrl.Path,
+		},
+	}
+	values, err := url.ParseQuery(resourceUrl.RawQuery)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if idValue := values.Get("id"); idValue != "" {
+		newValues := url.Values{}
+		newValues.Set("id", idValue)
+		resource.URL.RawQuery = newValues.Encode()
+	}
+	return resource
 }
 
 func (mr MoodleResource) IsCourse() bool {
 	return strings.HasPrefix(mr.URL.Path, "/course")
-}
-
-func (mr MoodleResource) Equals(other MoodleResource) bool {
-	if mr.Host != other.Host || mr.Scheme != other.Scheme || mr.Path != other.Path {
-		return false
-	}
-	if mr.RawQuery != "" || other.RawQuery != "" {
-		theseValues, err := url.ParseQuery(mr.RawQuery)
-		if err != nil {
-			return false
-		}
-		otherValues, err := url.ParseQuery(other.RawQuery)
-		if err != nil {
-			return false
-		}
-		for _, key := range []string{"id"} {
-			if theseValues.Get(key) != otherValues.Get(key) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 type Crawler struct {
@@ -75,7 +74,7 @@ func (c *Crawler) StartResource() MoodleResource {
 	target := *c.Base
 	target.Path += "/course/view.php"
 	target.RawQuery = parameters.Encode()
-	return MoodleResource{&target}
+	return NewResource(&target)
 }
 
 func (c *Crawler) IsExternal(resource MoodleResource) bool {
@@ -162,7 +161,7 @@ func (c *Crawler) fetchPage(resource MoodleResource) {
 			log.Fatal(err)
 		}
 		log.Println("redirect to", newTarget)
-		c.fetchPage(MoodleResource{newTarget})
+		c.fetchPage(NewResource(newTarget))
 	default:
 		log.Fatal("bad response", response.StatusCode, resource.URL)
 	}
