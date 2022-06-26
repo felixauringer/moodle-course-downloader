@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/joho/godotenv"
@@ -15,21 +16,12 @@ import (
 	"strings"
 )
 
-type config struct {
-	BaseUrl  *url.URL
-	CourseId int
-}
-
 type MoodleResource struct {
 	*url.URL
 }
 
 func (mr MoodleResource) IsCourse() bool {
 	return strings.HasPrefix(mr.URL.Path, "/course")
-}
-
-func (mr MoodleResource) IsExternal() bool {
-	return mr.Host != configuration.BaseUrl.Host
 }
 
 func (mr MoodleResource) Equals(other MoodleResource) bool {
@@ -54,40 +46,15 @@ func (mr MoodleResource) Equals(other MoodleResource) bool {
 	return true
 }
 
-func (c config) StartResource() MoodleResource {
-	parameters := url.Values{}
-	parameters.Set("id", strconv.Itoa(c.CourseId))
-	target := *configuration.BaseUrl
-	target.Path += "/course/view.php"
-	target.RawQuery = parameters.Encode()
-	return MoodleResource{&target}
+type Crawler struct {
+	*http.Client
+	Base     *url.URL
+	CourseId int
 }
 
-var client *http.Client
-var configuration config
-
-func parseFlags() config {
-	var courseId int
-	var domain string
-	var prefix string
-	flag.IntVar(&courseId, "id", 0, "the ID of the moodle course")
-	flag.StringVar(&domain, "domain", "", "the domain, e.g. `hpi.de`")
-	flag.StringVar(&prefix, "prefix", "", "optional path prefix, e.g. `/moodle`")
-	flag.Parse()
-	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s%s", domain, prefix))
-	if err != nil {
-		log.Fatal(err)
-	}
-	if parsedUrl.Host == "" || courseId == 0 {
-		log.Fatal("host and course ID have to be specified")
-	}
-	return config{parsedUrl, courseId}
-}
-
-func initialize() {
-	configuration = parseFlags()
+func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 	if err := godotenv.Load(); err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("could not load .env: %w", err)
 	}
 	sessionCookie := &http.Cookie{
 		Name:  os.Getenv("COOKIE_NAME"),
@@ -95,13 +62,31 @@ func initialize() {
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("could not create cookie jar: %w", err)
 	}
-	jar.SetCookies(configuration.BaseUrl, []*http.Cookie{sessionCookie})
-	client = &http.Client{Jar: jar}
+	jar.SetCookies(base, []*http.Cookie{sessionCookie})
+	client := &http.Client{Jar: jar}
+	return &Crawler{client, base, courseId}, nil
 }
 
-func parseHtml(resource MoodleResource, body io.ReadCloser) {
+func (c *Crawler) StartResource() MoodleResource {
+	parameters := url.Values{}
+	parameters.Set("id", strconv.Itoa(c.CourseId))
+	target := *c.Base
+	target.Path += "/course/view.php"
+	target.RawQuery = parameters.Encode()
+	return MoodleResource{&target}
+}
+
+func (c *Crawler) IsExternal(resource MoodleResource) bool {
+	return resource.Host != c.Base.Host
+}
+
+func (c *Crawler) Run() {
+	c.fetchPage(c.StartResource())
+}
+
+func (c *Crawler) parseHtml(resource MoodleResource, body io.ReadCloser) {
 	document, err := html.Parse(body)
 	if err != nil {
 		log.Fatal(err)
@@ -149,8 +134,8 @@ func parseHtml(resource MoodleResource, body io.ReadCloser) {
 	}
 }
 
-func fetchPage(resource MoodleResource) {
-	response, err := client.Get(resource.URL.String())
+func (c *Crawler) fetchPage(resource MoodleResource) {
+	response, err := c.Client.Get(resource.URL.String())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -166,7 +151,7 @@ func fetchPage(resource MoodleResource) {
 		contentType := strings.Split(contentTypeHeader, ";")[0]
 		switch contentType {
 		case "text/html":
-			parseHtml(resource, response.Body)
+			c.parseHtml(resource, response.Body)
 		default:
 			// TODO: save file
 		}
@@ -177,13 +162,13 @@ func fetchPage(resource MoodleResource) {
 			log.Fatal(err)
 		}
 		log.Println("redirect to", newTarget)
-		fetchPage(MoodleResource{newTarget})
+		c.fetchPage(MoodleResource{newTarget})
 	default:
 		log.Fatal("bad response", response.StatusCode, resource.URL)
 	}
 }
 
-func extractLinks(node *html.Node, base *url.URL) []*url.URL {
+func (c *Crawler) extractLinks(node *html.Node, base *url.URL) []*url.URL {
 	links := make([]*url.URL, 0)
 	if node.Type == html.ElementNode {
 		var attributeName string
@@ -214,12 +199,37 @@ func extractLinks(node *html.Node, base *url.URL) []*url.URL {
 		}
 	}
 	for current := node.FirstChild; current != nil; current = current.NextSibling {
-		links = append(links, extractLinks(current, base)...)
+		links = append(links, c.extractLinks(current, base)...)
 	}
 	return links
 }
 
+func loadConfiguration() (*url.URL, int, error) {
+	var courseId int
+	var domain string
+	var prefix string
+	flag.IntVar(&courseId, "id", 0, "the ID of the moodle course")
+	flag.StringVar(&domain, "domain", "", "the domain, e.g. `hpi.de`")
+	flag.StringVar(&prefix, "prefix", "", "optional path prefix, e.g. `/moodle`")
+	flag.Parse()
+	parsedUrl, err := url.Parse(fmt.Sprintf("https://%s%s", domain, prefix))
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not parse URL from config: %w", err)
+	}
+	if parsedUrl.Host == "" || courseId == 0 {
+		return nil, 0, errors.New("host and course ID have to be specified")
+	}
+	return parsedUrl, courseId, nil
+}
+
 func main() {
-	initialize()
-	fetchPage(configuration.StartResource())
+	base, courseId, err := loadConfiguration()
+	if err != nil {
+		log.Fatal(err)
+	}
+	crawler, err := NewCrawler(base, courseId)
+	if err != nil {
+		log.Fatal(err)
+	}
+	crawler.Run()
 }
