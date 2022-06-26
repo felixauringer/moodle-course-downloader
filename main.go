@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -23,6 +24,10 @@ type MoodleResource struct {
 
 func (mr MoodleResource) IsCourse() bool {
 	return strings.HasPrefix(mr.URL.Path, "/course")
+}
+
+func (mr MoodleResource) IsExternal() bool {
+	return mr.Host != configuration.BaseUrl.Host
 }
 
 func (mr MoodleResource) Equals(other MoodleResource) bool {
@@ -47,13 +52,13 @@ func (mr MoodleResource) Equals(other MoodleResource) bool {
 	return true
 }
 
-func (c config) StartUrl() *url.URL {
+func (c config) StartResoure() MoodleResource {
 	parameters := url.Values{}
 	parameters.Set("id", strconv.Itoa(c.CourseId))
 	target := *configuration.BaseUrl
 	target.Path += "/course/view.php"
 	target.RawQuery = parameters.Encode()
-	return &target
+	return MoodleResource{&target}
 }
 
 var client *http.Client
@@ -82,8 +87,56 @@ func initialize() {
 	configuration = parseFlags()
 }
 
-func fetchPage(target *url.URL) {
-	response, err := client.Get(target.String())
+func parseHtml(resource MoodleResource, body io.ReadCloser) {
+	document, err := html.Parse(body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resource.IsCourse() {
+		var findBodyAndContent func(*html.Node) (*html.Node, *html.Node)
+		findBodyAndContent = func(current *html.Node) (*html.Node, *html.Node) {
+			if current.Type == html.ElementNode && current.Data == "div" {
+				for _, attribute := range current.Attr {
+					if attribute.Key == "class" && attribute.Val == "course-content" {
+						return nil, current
+					}
+				}
+			}
+			for child := current.FirstChild; child != nil; child = child.NextSibling {
+				bodyNode, contentNode := findBodyAndContent(child)
+				if bodyNode != nil && contentNode != nil {
+					return bodyNode, contentNode
+				} else if contentNode != nil {
+					if current.Type == html.ElementNode && current.Data == "body" {
+						return current, contentNode
+					} else {
+						return nil, contentNode
+					}
+				}
+			}
+			return nil, nil
+		}
+		bodyNode, contentNode := findBodyAndContent(document)
+		if body == nil || contentNode == nil {
+			log.Fatal("course page without course content")
+		}
+		contentNode.NextSibling = nil
+		contentNode.PrevSibling = nil
+		contentNode.Parent = bodyNode
+		bodyNode.FirstChild = contentNode
+		bodyNode.LastChild = contentNode
+	}
+	//links := extractLinks(document, resource.URL)
+	//for _, link := range links {
+	//	fmt.Println(*link)
+	//}
+	if err := html.Render(os.Stdout, document); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func fetchPage(resource MoodleResource) {
+	response, err := client.Get(resource.URL.String())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -93,10 +146,26 @@ func fetchPage(target *url.URL) {
 		}
 	}(response.Body)
 
-	document, err := html.Parse(response.Body)
-	links := extractLinks(document, target)
-	for _, link := range links {
-		fmt.Println(*link)
+	switch {
+	case response.StatusCode >= 200 && response.StatusCode < 300:
+		contentTypeHeader := response.Header.Get("content-type")
+		contentType := strings.Split(contentTypeHeader, ";")[0]
+		switch contentType {
+		case "text/html":
+			parseHtml(resource, response.Body)
+		default:
+			// TODO: save file
+		}
+	case response.StatusCode >= 300 && response.StatusCode < 400:
+		location := response.Header.Get("location")
+		newTarget, err := url.Parse(location)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("redirect to", newTarget)
+		fetchPage(MoodleResource{newTarget})
+	default:
+		log.Fatal("bad response", response.StatusCode, resource.URL)
 	}
 }
 
@@ -117,6 +186,9 @@ func extractLinks(node *html.Node, base *url.URL) []*url.URL {
 					href, err := url.Parse(attribute.Val)
 					if err != nil {
 						log.Fatal(err)
+					}
+					if href.Scheme == "javascript" {
+						break
 					}
 					if !href.IsAbs() {
 						href = base.ResolveReference(href)
