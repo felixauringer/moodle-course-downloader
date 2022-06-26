@@ -1,3 +1,6 @@
 # ignore the compiled binary
 moodle-course-downloader
 
+# ignore default output directory
+output/
+
