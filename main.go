@@ -43,15 +43,24 @@ func NewResource(resourceUrl *url.URL) MoodleResource {
 	return resource
 }
 
-func (mr MoodleResource) IsCourse() bool {
-	return strings.HasPrefix(mr.URL.Path, "/course")
+func (mr MoodleResource) IsRelevant() bool {
+	for _, prefix := range []string{"/user", "/mod/forum", "/theme", "/course/search.php", "/my", "/message", "/auth", "/login", "/portfolio", "/course/user.php", "/grade/report/overview"} {
+		if strings.HasPrefix(mr.URL.Path, prefix) {
+			return false
+		}
+	}
+	if mr.URL.Path == "" || mr.URL.Path == "/" {
+		return false
+	}
+	return true
 }
 
 type Crawler struct {
 	*http.Client
 	Base       *url.URL
 	CourseId   int
-	Visited    set.Set[MoodleResource]
+	Done       set.Set[MoodleResource]
+	DoneMutex  *sync.Mutex
 	Queue      set.Set[MoodleResource]
 	QueueMutex *sync.Mutex
 }
@@ -75,18 +84,19 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 		base,
 		courseId,
 		set.NewSet[MoodleResource](),
+		&sync.Mutex{},
 		set.NewSet[MoodleResource](),
 		&sync.Mutex{},
 	}, nil
 }
 
-func (c *Crawler) startResource() MoodleResource {
+func (c *Crawler) startPoint() string {
 	parameters := url.Values{}
 	parameters.Set("id", strconv.Itoa(c.CourseId))
 	target := *c.Base
 	target.Path += "/course/view.php"
 	target.RawQuery = parameters.Encode()
-	return NewResource(&target)
+	return target.String()
 }
 
 func (c *Crawler) isExternal(resource MoodleResource) bool {
@@ -94,58 +104,102 @@ func (c *Crawler) isExternal(resource MoodleResource) bool {
 }
 
 func (c *Crawler) Run() {
-	c.fetchPage(c.startResource())
+	c.enqueue(c.startPoint(), MoodleResource{})
+	for {
+		c.QueueMutex.Lock()
+		// TODO: with multiple threads, the queue could only be empty temporarily
+		if c.Queue.Cardinality() == 0 {
+			c.QueueMutex.Unlock()
+			break
+		}
+		element, ok := c.Queue.Pop()
+		if !ok {
+			log.Fatal("could not pop next element from queue")
+		}
+		c.DoneMutex.Lock()
+		c.Done.Add(element)
+		c.DoneMutex.Unlock()
+		c.QueueMutex.Unlock()
+		c.fetchPage(element)
+	}
 }
 
-func (c *Crawler) parseHtml(resource MoodleResource, body io.ReadCloser) {
+func (c *Crawler) enqueue(targetUrl string, reference MoodleResource) {
+	newTarget, err := url.Parse(targetUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if newTarget.Scheme == "http" || newTarget.Scheme == "https" {
+		if !newTarget.IsAbs() {
+			newTarget = reference.ResolveReference(newTarget)
+		}
+		resource := NewResource(newTarget)
+		if c.isExternal(resource) {
+			c.DoneMutex.Lock()
+			c.Done.Add(resource)
+			c.DoneMutex.Unlock()
+		} else if resource.IsRelevant() {
+			c.QueueMutex.Lock()
+			c.DoneMutex.Lock()
+			if !c.Queue.Contains(resource) && !c.Done.Contains(resource) {
+				c.Queue.Add(resource)
+				log.Printf("enqueued %q", resource.String())
+			}
+			c.DoneMutex.Unlock()
+			c.QueueMutex.Unlock()
+		}
+	} else if newTarget.Scheme == "mailto" {
+		log.Printf("Found mail address: %+v", newTarget)
+	}
+}
+
+func (c *Crawler) parseHtml(body io.ReadCloser, resource MoodleResource) {
 	document, err := html.Parse(body)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if resource.IsCourse() {
-		var findBodyAndContent func(*html.Node) (*html.Node, *html.Node)
-		findBodyAndContent = func(current *html.Node) (*html.Node, *html.Node) {
-			if current.Type == html.ElementNode && current.Data == "div" {
-				for _, attribute := range current.Attr {
-					if attribute.Key == "class" && attribute.Val == "course-content" {
-						return nil, current
-					}
+	var findBodyAndContent func(*html.Node) (*html.Node, *html.Node)
+	findBodyAndContent = func(current *html.Node) (*html.Node, *html.Node) {
+		if current.Type == html.ElementNode && current.Data == "div" {
+			for _, attribute := range current.Attr {
+				if attribute.Key == "class" && attribute.Val == "region-main" {
+					return nil, current
 				}
 			}
-			for child := current.FirstChild; child != nil; child = child.NextSibling {
-				bodyNode, contentNode := findBodyAndContent(child)
-				if bodyNode != nil && contentNode != nil {
-					return bodyNode, contentNode
-				} else if contentNode != nil {
-					if current.Type == html.ElementNode && current.Data == "body" {
-						return current, contentNode
-					} else {
-						return nil, contentNode
-					}
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			bodyNode, contentNode := findBodyAndContent(child)
+			if bodyNode != nil && contentNode != nil {
+				return bodyNode, contentNode
+			} else if contentNode != nil {
+				if current.Type == html.ElementNode && current.Data == "body" {
+					return current, contentNode
+				} else {
+					return nil, contentNode
 				}
 			}
-			return nil, nil
 		}
-		bodyNode, contentNode := findBodyAndContent(document)
-		if body == nil || contentNode == nil {
-			log.Fatal("course page without course content")
-		}
+		return nil, nil
+	}
+	bodyNode, contentNode := findBodyAndContent(document)
+	if body != nil && contentNode != nil {
 		contentNode.NextSibling = nil
 		contentNode.PrevSibling = nil
 		contentNode.Parent = bodyNode
 		bodyNode.FirstChild = contentNode
 		bodyNode.LastChild = contentNode
+	} else {
+		log.Printf("found html without expected structure: %q", resource.String())
 	}
-	//links := extractLinks(document, resource.URL)
-	//for _, link := range links {
-	//	fmt.Println(*link)
+
+	c.extractLinks(document, resource)
+	//if err := html.Render(os.Stdout, document); err != nil {
+	//	log.Fatal(err)
 	//}
-	if err := html.Render(os.Stdout, document); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func (c *Crawler) fetchPage(resource MoodleResource) {
+	log.Printf("fetching %q", resource.String())
 	response, err := c.Client.Get(resource.URL.String())
 	if err != nil {
 		log.Fatal(err)
@@ -162,25 +216,20 @@ func (c *Crawler) fetchPage(resource MoodleResource) {
 		contentType := strings.Split(contentTypeHeader, ";")[0]
 		switch contentType {
 		case "text/html":
-			c.parseHtml(resource, response.Body)
+			c.parseHtml(response.Body, resource)
 		default:
 			// TODO: save file
 		}
 	case response.StatusCode >= 300 && response.StatusCode < 400:
 		location := response.Header.Get("location")
-		newTarget, err := url.Parse(location)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Println("redirect to", newTarget)
-		c.fetchPage(NewResource(newTarget))
+		log.Println("redirect to", location)
+		c.enqueue(location, resource)
 	default:
-		log.Fatal("bad response", response.StatusCode, resource.URL)
+		log.Printf("bad response (%d) for %q", response.StatusCode, resource.String())
 	}
 }
 
-func (c *Crawler) extractLinks(node *html.Node, base *url.URL) []*url.URL {
-	links := make([]*url.URL, 0)
+func (c *Crawler) extractLinks(node *html.Node, reference MoodleResource) {
 	if node.Type == html.ElementNode {
 		var attributeName string
 		if node.Data == "a" {
@@ -193,26 +242,15 @@ func (c *Crawler) extractLinks(node *html.Node, base *url.URL) []*url.URL {
 		if attributeName != "" {
 			for _, attribute := range node.Attr {
 				if attribute.Key == attributeName {
-					href, err := url.Parse(attribute.Val)
-					if err != nil {
-						log.Fatal(err)
-					}
-					if href.Scheme == "javascript" {
-						break
-					}
-					if !href.IsAbs() {
-						href = base.ResolveReference(href)
-					}
-					links = append(links, href)
+					c.enqueue(attribute.Val, reference)
 					break
 				}
 			}
 		}
 	}
 	for current := node.FirstChild; current != nil; current = current.NextSibling {
-		links = append(links, c.extractLinks(current, base)...)
+		c.extractLinks(current, reference)
 	}
-	return links
 }
 
 func loadConfiguration() (*url.URL, int, error) {
