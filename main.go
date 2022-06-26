@@ -83,9 +83,9 @@ func NewCrawler(base *url.URL, courseId int) (*Crawler, error) {
 		client,
 		base,
 		courseId,
-		set.NewSet[MoodleResource](),
+		set.NewThreadUnsafeSet[MoodleResource](),
 		&sync.Mutex{},
-		set.NewSet[MoodleResource](),
+		set.NewThreadUnsafeSet[MoodleResource](),
 		&sync.Mutex{},
 	}, nil
 }
