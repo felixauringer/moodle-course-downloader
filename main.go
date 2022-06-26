@@ -108,7 +108,7 @@ func (c *Crawler) isExternal(resource MoodleResource) bool {
 	return resource.Host != c.BaseURL.Host
 }
 
-func (c *Crawler) FilePath(resource MoodleResource, contentType string) string {
+func (c *Crawler) filePath(resource MoodleResource, contentType string) string {
 	components := []string{c.BasePath, fmt.Sprintf("%s-%s", resource.Scheme, resource.Host), resource.Path}
 	values, err := url.ParseQuery(resource.RawQuery)
 	if err == nil {
@@ -137,6 +137,52 @@ func (c *Crawler) FilePath(resource MoodleResource, contentType string) string {
 	return filePath
 }
 
+func (c *Crawler) exportSummary() {
+	components := []string{c.BasePath, fmt.Sprintf("%s-%s", c.BaseURL.Scheme, c.BaseURL.Host), "summary.txt"}
+	filePath := filepath.Join(components...)
+	outputFile, err := os.Create(filePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func(outputFile *os.File) {
+		err := outputFile.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(outputFile)
+	downloaded := make([]string, 0)
+	external := make([]string, 0)
+	c.DoneMutex.Lock()
+	for resource := range c.Done.Iterator().C {
+		if c.isExternal(resource) {
+			external = append(external, resource.String())
+		} else {
+			downloaded = append(downloaded, resource.String())
+		}
+	}
+	c.DoneMutex.Unlock()
+	_, err = outputFile.WriteString(fmt.Sprintf("The crawler downloaded %d moodle resources:\n", len(downloaded)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, downloadedURL := range downloaded {
+		_, err = outputFile.WriteString(fmt.Sprintf("\t%s\n", downloadedURL))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	_, err = outputFile.WriteString(fmt.Sprintf("The crawler found %d external resources:\n", len(external)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, externalURL := range external {
+		_, err = outputFile.WriteString(fmt.Sprintf("\t%s\n", externalURL))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
 func (c *Crawler) Run() {
 	c.enqueue(c.startPoint(), MoodleResource{})
 	for {
@@ -156,6 +202,7 @@ func (c *Crawler) Run() {
 		c.QueueMutex.Unlock()
 		c.fetchPage(element)
 	}
+	c.exportSummary()
 }
 
 func (c *Crawler) enqueue(targetUrl string, reference MoodleResource) {
@@ -255,7 +302,7 @@ func (c *Crawler) fetchPage(resource MoodleResource) {
 	case response.StatusCode >= 200 && response.StatusCode < 300:
 		contentTypeHeader := response.Header.Get("content-type")
 		contentType := strings.Split(contentTypeHeader, ";")[0]
-		outputFile, err := os.Create(c.FilePath(resource, contentType))
+		outputFile, err := os.Create(c.filePath(resource, contentType))
 		if err != nil {
 			log.Fatal(err)
 		}
